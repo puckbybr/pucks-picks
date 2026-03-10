@@ -947,7 +947,7 @@ function refreshIntel(sport){intelLoaded[sport]=false;intelLoading[sport]=false;
 
 const ODDS_SPORT={
   'NHL':'icehockey_nhl','NBA':'basketball_nba','NFL':'americanfootball_nfl','MLB':'baseball_mlb',
-  'NCAA MBB':'basketball_ncaab','NCAA FB':'americanfootball_ncaaf','Col. Baseball':'baseball_ncaa','PGA':'golf_pga_championship_winner'
+  'NCAA MBB':'basketball_ncaab','NCAA FB':'americanfootball_ncaaf','Col. Baseball':'baseball_ncaa','PGA':'golf_pga_tour'
 };
 
 async function fetchIntelForSport(sport){
@@ -965,7 +965,19 @@ async function fetchIntelForSport(sport){
     if(!Array.isArray(games)||games.length===0){
       intelBySport[sport]=[{type:'update',game:'',line:'',note:`No ${sport} games with lines available right now. Check back closer to game time.`,source:'The Odds API',ts:'Now'}];
     } else {
-      const tg=games.filter(g=>new Date(g.commence_time).toDateString()===today||games.length<=5);
+      // Show today's games; if none, show next 8 upcoming sorted by date
+      const todayGames = games.filter(g => new Date(g.commence_time).toDateString()===today);
+      const tg = todayGames.length > 0
+        ? todayGames
+        : games.filter(g => new Date(g.commence_time) > new Date())
+               .sort((a,b) => new Date(a.commence_time)-new Date(b.commence_time))
+               .slice(0,8);
+      if(!tg.length){
+        intelBySport[sport]=[{type:'update',game:'',line:'',note:`No upcoming ${sport} games with lines found. Check back closer to the season.`,source:'The Odds API',ts:'Now'}];
+        intelLoaded[sport]=true; intelLoading[sport]=false;
+        if(panel) panel.innerHTML=renderIntelCards(sport);
+        return;
+      }
       intelBySport[sport]=tg.slice(0,8).map((g,idx2)=>{
         const home=g.home_team,away=g.away_team;
         const dt=new Date(g.commence_time);
@@ -980,7 +992,7 @@ async function fetchIntelForSport(sport){
           if(t2){const ov=t2.outcomes?.find(o=>o.name==='Over');if(ov)ou=`O/U ${ov.point} (${ov.price>0?'+':''}${ov.price})`;}
         }
         const isBest=idx2<2;
-        return {type:isBest?'best':'line',game:`${away} @ ${home}`,game_date:ds,game_time_et:tET,money_line:ml,puck_line:pl,over_under:ou,line:'',note:`${sport} matchup — ${book?.title||'odds'} lines. Monitor for sharp money movement. Analysis posts at 11:30 AM ET.`,source:book?.title||'Odds API',ts:'Live'};
+        return {type:isBest?'best':'line',game:`${away} @ ${home}`,game_date:ds,game_time_et:tET,money_line:ml,puck_line:pl,over_under:ou,line:'',note:`${sport} matchup — ${book?.title||'odds'} lines. ${ds} · ${tET} · Monitor for sharp money movement.`,source:book?.title||'Odds API',ts:'Live'};
       });
     }
     intelLoaded[sport]=true;
@@ -1078,7 +1090,7 @@ async function runBetAnalysis() {
     'NCAA MBB':     { api:'basketball_ncaab',             gametime:'tip-off',     unit:'points',  limit:4 },
     'NCAA FB':      { api:'americanfootball_ncaaf',       gametime:'kickoff',     unit:'points',  limit:4 },
     'Col. Baseball':{ api:'baseball_ncaa',                gametime:'first pitch', unit:'runs',    limit:4 },
-    'PGA':          { api:'golf_pga_championship_winner', gametime:'tee time',    unit:'strokes', limit:6 },
+    'PGA':          { api:'golf_pga_tour', gametime:'tee time',    unit:'strokes', limit:6 },
   };
 
   const updatedAt = now.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',hour12:true}) + ' ET';

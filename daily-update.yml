@@ -1,0 +1,32 @@
+name: Daily Slate Update
+
+on:
+  schedule:
+    # Runs at 11 AM UTC = 7 AM ET (EDT, Mar-Nov)
+    # During EST (Nov-Mar) change to: '0 12 * * *'
+    - cron: '0 11 * * *'
+  workflow_dispatch:  # also allows manual trigger from GitHub Actions tab
+
+jobs:
+  update-slate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build dashboard (fetches live odds automatically)
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+        run: python3 build_v3.py
+
+      - name: Commit and push updated dashboard
+        run: |
+          git config user.name "PuckPicksBot"
+          git config user.email "bot@puckpicks.com"
+          git add index.html
+          git diff --staged --quiet || git commit -m "Auto slate update: $(TZ=America/New_York date '+%a %b %-d')"
+          git push

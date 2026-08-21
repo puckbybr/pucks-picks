@@ -1335,30 +1335,40 @@ function autoGradeEloHistory(liveScores){
   try{
     var history=JSON.parse(localStorage.getItem(ELO_HISTORY_KEY)||'[]');
     var changed=0;
-    var finals=liveScores.filter(function(s){return s.isFinal;});
+    /* STRICT: Only use confirmed final scores — state must be 'post' */
+    var finals=liveScores.filter(function(s){return s.isFinal===true;});
     if(!finals.length) return;
 
-    var etOff2=-4*60;
-    var todayET=new Date(Date.now()+etOff2*60*1000).toISOString().split('T')[0];
     history.forEach(function(h){
-      /* Grade pending picks AND re-check today's W/L (catches grading bugs) */
-      if(h.result!=='pending'&&h.date!==todayET) return;
+      /* ONLY grade picks that are still pending — never re-grade W or L */
+      if(h.result!=='pending') return;
 
-      /* Find matching final score */
+      var parts=h.matchup.split(' @ ');
+      if(parts.length!==2) return;
+      var awayAbbr=parts[0].trim().toUpperCase();
+      var homeAbbr=parts[1].trim().toUpperCase();
+
+      /* Strict matching — abbreviation must equal ESPN abbr exactly
+         Also try full name contains abbr as fallback */
       var match=finals.find(function(s){
-        /* Match by team abbreviations in matchup "AWAY @ HOME" */
-        var parts=h.matchup.split(' @ ');
-        if(parts.length!==2) return false;
-        var awayAbbr=parts[0].trim();
-        var homeAbbr=parts[1].trim();
-        return (s.away===awayAbbr&&s.home===homeAbbr)||
-               (s.awayFull&&s.awayFull.toUpperCase().indexOf(awayAbbr)>=0)||
-               (s.homeFull&&s.homeFull.toUpperCase().indexOf(homeAbbr)>=0);
+        var sAway=(s.away||'').toUpperCase();
+        var sHome=(s.home||'').toUpperCase();
+        var sAwayFull=(s.awayFull||'').toUpperCase();
+        var sHomeFull=(s.homeFull||'').toUpperCase();
+        /* Primary: exact abbreviation match */
+        if(sAway===awayAbbr&&sHome===homeAbbr) return true;
+        /* Secondary: full team name contains the abbreviation we stored */
+        if(sAwayFull.indexOf(awayAbbr)>=0&&awayAbbr.length>=3&&sHomeFull.indexOf(homeAbbr)>=0&&homeAbbr.length>=3) return true;
+        return false;
       });
       if(!match) return;
 
-      var awayScore=parseInt(match.awayScore)||0;
-      var homeScore=parseInt(match.homeScore)||0;
+      /* Sanity check: scores must be valid numbers and game must be final */
+      var awayScore=parseInt(match.awayScore);
+      var homeScore=parseInt(match.homeScore);
+      if(isNaN(awayScore)||isNaN(homeScore)||awayScore+homeScore===0) return;
+      if(!match.isFinal) return; /* Double-check — never grade in-progress */
+
       var pickUpper=h.pick.toUpperCase();
 
       /* Determine result based on pick type */
@@ -1428,11 +1438,9 @@ async function gradeRecentPending(){
     var history=JSON.parse(localStorage.getItem(ELO_HISTORY_KEY)||'[]');
     var etOff=-4*60;
     var today=new Date(Date.now()+etOff*60*1000).toISOString().split('T')[0];
-    /* Re-grade pending AND today's picks (catches wrong earlier grades) */
-    var toCheck=history.filter(function(h){
-      return h.result==='pending'||(h.date===today&&(h.result==='W'||h.result==='L'));
-    });
-    if(!toCheck.length){dbg('Grade check: nothing to re-grade');return;}
+    /* Only check pending picks — never re-grade */
+    var toCheck=history.filter(function(h){return h.result==='pending';});
+    if(!toCheck.length){dbg('Grade check: no pending picks');return;}
 
     var etOff=-4*60;
     var today=new Date(Date.now()+etOff*60*1000).toISOString().split('T')[0];
@@ -3372,7 +3380,32 @@ async function refreshAll(){
 refreshAll();
 scheduleEndOfDaySweep();
 renderEloHistory();
-gradeRecentPending(); // immediately grade any pending picks from recent days
+gradeRecentPending();
+
+/* One-time fix: correct any wrong grades from the pickedAway bug.
+   Resets today's W/L grades back to pending so they re-grade correctly. */
+;(function fixWrongGrades(){
+  try{
+    var etOff=-4*60;
+    var today=new Date(Date.now()+etOff*60*1000).toISOString().split('T')[0];
+    var fixKey='pucks_grade_fixed_'+today;
+    if(localStorage.getItem(fixKey)) return; // already ran today
+    var history=JSON.parse(localStorage.getItem(ELO_HISTORY_KEY)||'[]');
+    var reset=0;
+    history.forEach(function(h){
+      /* Reset today's W/L grades back to pending so grader re-evaluates with fixed logic */
+      if(h.date===today&&(h.result==='W'||h.result==='L')){
+        h.result='pending';
+        reset++;
+      }
+    });
+    if(reset>0){
+      localStorage.setItem(ELO_HISTORY_KEY,JSON.stringify(history));
+      localStorage.setItem(fixKey,'1');
+      dbg('Grade fix: reset '+reset+' today picks to pending for re-grading');
+    }
+  }catch(e){}
+})();
 </script>
 </body>
 </html>

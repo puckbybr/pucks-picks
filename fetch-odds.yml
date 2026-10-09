@@ -1,0 +1,106 @@
+name: Fetch Odds
+
+on:
+  schedule:
+    - cron: '0 21 * * *'   # Daily 4PM ET
+    # Extra weekend runs re-enable November 1 when credits reset:
+    # - cron: '0 12 * * 6'   # Saturday 8AM ET — NCAAFB noon kickoffs
+    # - cron: '0 14 * * 0'   # Sunday 10AM ET — early NFL games
+  workflow_dispatch:         # Manual trigger from Actions tab
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch odds and save to Gist
+        env:
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+        run: |
+          node << 'EOF'
+          const https = require('https');
+
+          const ODDS_KEY    = '3b6575443e2403327658322a07460ebc';
+          const GIST_ID     = 'aa152fd88a987e42a009b7a5686690a1';
+          const GIST_TOKEN  = process.env.GIST_TOKEN;
+
+          const d     = new Date();
+          const month = d.getUTCMonth() + 1;
+          const day   = d.getUTCDate();
+          const dow   = d.getUTCDay(); // 0=Sun,1=Mon,...,6=Sat
+
+          const sports = [];
+          /* === OCTOBER CREDIT CONSERVATION MODE ===
+             NHL only until Nov 1 reset (1 credit/day = 23 credits remaining)
+             Re-enable all sports November 1 when credits reset to 500 */
+          if (month >= 9 || month <= 6)                                    sports.push('icehockey_nhl');
+
+          /* ALL BELOW: re-enable November 1 */
+          if (month !== 10) {
+            /* NHL period lines — Nov 1+ only */
+            // sports.push('icehockey_nhl_1st_period_markets');
+            // sports.push('icehockey_nhl_2nd_period_markets');
+            if (month === 10)                                                sports.push('baseball_mlb_postseason');
+            if (month >= 3  && month <= 9)                                   sports.push('baseball_mlb');
+            if ((month === 10 && day >= 21) || month >= 11 || month <= 6)   sports.push('basketball_nba');
+            if ((month >= 9  || month <= 2) && [0,1,4,5,6].includes(dow))  sports.push('americanfootball_nfl');
+            if ((month >= 9  || month === 1) && [4,5,6].includes(dow))      sports.push('americanfootball_ncaaf');
+            if (month >= 11 || month <= 4)                                   sports.push('basketball_ncaab');
+          }
+
+          console.log('Date:', d.toUTCString());
+          console.log('Active sports:', sports.join(', ') || 'none');
+
+          function get(url) {
+            return new Promise((resolve) => {
+              https.get(url, res => {
+                let data = '';
+                res.on('data', c => data += c);
+                res.on('end', () => {
+                  if (res.statusCode === 200) resolve(JSON.parse(data));
+                  else { console.log('HTTP ' + res.statusCode); resolve([]); }
+                });
+              }).on('error', e => { console.log('Error:', e.message); resolve([]); });
+            });
+          }
+
+          function saveGist(content) {
+            return new Promise((resolve, reject) => {
+              const body = JSON.stringify({ files: { 'odds.json': { content } } });
+              const req = https.request({
+                hostname: 'api.github.com',
+                path: `/gists/${GIST_ID}`,
+                method: 'PATCH',
+                headers: {
+                  'Authorization': `token ${GIST_TOKEN}`,
+                  'Content-Type': 'application/json',
+                  'User-Agent': 'PucksPicks',
+                  'Content-Length': Buffer.byteLength(body)
+                }
+              }, res => {
+                let d = '';
+                res.on('data', c => d += c);
+                res.on('end', () => res.statusCode === 200 ? resolve() : reject('Gist error: ' + res.statusCode));
+              });
+              req.on('error', reject);
+              req.write(body);
+              req.end();
+            });
+          }
+
+          (async () => {
+            const all = [];
+            for (const sport of sports) {
+              const url = `https://api.the-odds-api.com/v4/sports/${sport}/odds/?apiKey=${ODDS_KEY}&regions=us&markets=h2h,totals,spreads&oddsFormat=american&bookmakers=draftkings,fanduel,betmgm,caesars,betrivers`;
+              const games = await get(url);
+              all.push(...games);
+              console.log(sport + ': ' + games.length + ' games');
+            }
+
+            const etTime = new Date().toLocaleTimeString('en-US', {
+              hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York'
+            }) + ' ET';
+
+            await saveGist(JSON.stringify({ games: all, updatedAt: etTime, gameCount: all.length }));
+            console.log('Done: ' + all.length + ' games saved at ' + etTime);
+          })().catch(e => { console.error(e); process.exit(1); });
+          EOF

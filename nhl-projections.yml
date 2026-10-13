@@ -1,0 +1,204 @@
+name: NHL Period Projections
+
+on:
+  schedule:
+    - cron: '0 21 * * *'   # 4PM ET daily (21:00 UTC = 4PM EST Nov-Mar)
+  workflow_dispatch:
+
+jobs:
+  project:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Calculate NHL period projections and post to Discord
+        run: |
+          node << 'EOF'
+          const https = require('https');
+
+          const DISCORD_WEBHOOK = 'https://discord.com/api/webhooks/1559369134297325668/KUrh623sx2X2mSemwznpujq1FR3VPDf6sEL471FDsDn_H8mFdGL50C36YWdQmajzgK-l';
+
+          function get(url) {
+            return new Promise((res, rej) => {
+              https.get(url, {
+                headers: {'User-Agent':'Mozilla/5.0','Accept':'application/json'}
+              }, r => {
+                let d=''; r.on('data',c=>d+=c);
+                r.on('end',()=>{try{res(JSON.parse(d));}catch(e){rej(e);}});
+              }).on('error',rej);
+            });
+          }
+
+          function postDiscord(content) {
+            return new Promise((res,rej)=>{
+              const body = JSON.stringify({content});
+              const url = new URL(DISCORD_WEBHOOK);
+              const req = https.request({
+                hostname: url.hostname,
+                path: url.pathname,
+                method: 'POST',
+                headers: {
+                  'Content-Type':'application/json',
+                  'Content-Length':Buffer.byteLength(body)
+                }
+              }, r => {
+                let d=''; r.on('data',c=>d+=c);
+                r.on('end',()=>res(r.statusCode));
+              });
+              req.on('error',rej);
+              req.write(body);
+              req.end();
+            });
+          }
+
+          async function main() {
+            const etNow = new Date(Date.now() - 4*60*60*1000);
+            const todayStr = etNow.toISOString().split('T')[0].replace(/-/g,'');
+            const displayDate = etNow.toLocaleDateString('en-US',{
+              weekday:'long', month:'long', day:'numeric', year:'numeric'
+            });
+
+            /* ── STEP 1: Build period rates from ESPN box scores ──────────
+               Formula: (GF in period + GA in period) / GP
+               Pull last 30 days to get enough sample size per team */
+            const teamStats = {};
+
+            for (let i = 1; i <= 30; i++) {
+              const d = new Date(etNow.getTime() - i*86400000);
+              const ds = d.toISOString().split('T')[0].replace(/-/g,'');
+              try {
+                const data = await get(
+                  `https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/scoreboard?dates=${ds}`
+                );
+                for (const ev of (data.events||[])) {
+                  /* Final games only */
+                  const status = ev.status&&ev.status.type&&ev.status.type.name;
+                  if (status !== 'STATUS_FINAL') continue;
+
+                  const comp = ev.competitions&&ev.competitions[0];
+                  if (!comp) continue;
+                  const competitors = comp.competitors||[];
+                  const away = competitors.find(c=>c.homeAway==='away');
+                  const home = competitors.find(c=>c.homeAway==='home');
+                  if (!away||!home) continue;
+
+                  const awayAbbr = (away.team&&away.team.abbreviation||'').toUpperCase();
+                  const homeAbbr = (home.team&&home.team.abbreviation||'').toUpperCase();
+
+                  /* linescores = array of period scores [P1, P2, P3, OT?] */
+                  const awayScores = (away.linescores||[]).map(l=>parseInt(l.value||0));
+                  const homeScores = (home.linescores||[]).map(l=>parseInt(l.value||0));
+
+                  const awayP1 = awayScores[0]||0;
+                  const awayP2 = awayScores[1]||0;
+                  const homeP1 = homeScores[0]||0;
+                  const homeP2 = homeScores[1]||0;
+
+                  /* Away team stats: GF = their goals, GA = opponent goals */
+                  if (!teamStats[awayAbbr]) teamStats[awayAbbr]={p1gf:0,p1ga:0,p2gf:0,p2ga:0,gp:0};
+                  teamStats[awayAbbr].p1gf += awayP1;
+                  teamStats[awayAbbr].p1ga += homeP1;
+                  teamStats[awayAbbr].p2gf += awayP2;
+                  teamStats[awayAbbr].p2ga += homeP2;
+                  teamStats[awayAbbr].gp++;
+
+                  /* Home team stats */
+                  if (!teamStats[homeAbbr]) teamStats[homeAbbr]={p1gf:0,p1ga:0,p2gf:0,p2ga:0,gp:0};
+                  teamStats[homeAbbr].p1gf += homeP1;
+                  teamStats[homeAbbr].p1ga += awayP1;
+                  teamStats[homeAbbr].p2gf += homeP2;
+                  teamStats[homeAbbr].p2ga += awayP2;
+                  teamStats[homeAbbr].gp++;
+                }
+              } catch(e) {
+                /* Skip days with no data */
+              }
+            }
+
+            /* Calculate rate per team: (GF + GA) / GP */
+            const RATES = {};
+            for (const [abbr, s] of Object.entries(teamStats)) {
+              if (s.gp > 0) {
+                RATES[abbr] = {
+                  p1: (s.p1gf + s.p1ga) / s.gp,
+                  p2: (s.p2gf + s.p2ga) / s.gp,
+                  gp: s.gp
+                };
+              }
+            }
+
+            console.log(`Period rates built for ${Object.keys(RATES).length} teams`);
+
+            /* ── STEP 2: Get today's scheduled games ──────────────────── */
+            const todayData = await get(
+              `https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/scoreboard?dates=${todayStr}`
+            );
+
+            const games = (todayData.events||[]).filter(ev=>{
+              const s = ev.status&&ev.status.type&&ev.status.type.name;
+              return s==='STATUS_SCHEDULED'||s==='STATUS_PRE_GAME';
+            });
+
+            if (!games.length) {
+              await postDiscord(`🏒 **NHL Period Projections — ${displayDate}**\n\nNo NHL games scheduled today.`);
+              return;
+            }
+
+            /* ── STEP 3: Calculate projections and build message ───────── */
+            let msg = `🏒 **NHL Period Goal Projections**\n`;
+            msg += `📅 ${displayDate}\n`;
+            msg += `📊 *Formula: (GF+GA)÷GP per period, visitor + home averaged*\n\n`;
+
+            for (const ev of games) {
+              const comp = ev.competitions&&ev.competitions[0];
+              if (!comp) continue;
+              const competitors = comp.competitors||[];
+              const away = competitors.find(c=>c.homeAway==='away');
+              const home = competitors.find(c=>c.homeAway==='home');
+              if (!away||!home) continue;
+
+              const awayAbbr = (away.team&&away.team.abbreviation||'').toUpperCase();
+              const homeAbbr = (home.team&&home.team.abbreviation||'').toUpperCase();
+              const awayName = away.team&&away.team.shortDisplayName||awayAbbr;
+              const homeName = home.team&&home.team.shortDisplayName||homeAbbr;
+              const gameTime = new Date(ev.date).toLocaleTimeString('en-US',{
+                hour:'numeric', minute:'2-digit', timeZone:'America/New_York'
+              })+' ET';
+
+              const awayR = RATES[awayAbbr];
+              const homeR = RATES[homeAbbr];
+
+              if (!awayR||!homeR) {
+                console.log(`No data for ${awayAbbr} or ${homeAbbr} — skipping`);
+                continue;
+              }
+
+              /* Average visitor rate + home rate */
+              const p1 = ((awayR.p1 + homeR.p1) / 2).toFixed(2);
+              const p2 = ((awayR.p2 + homeR.p2) / 2).toFixed(2);
+
+              msg += `**${awayName} @ ${homeName}** · ${gameTime}\n`;
+              msg += `> 1️⃣ 1st Period: **${p1}** goals\n`;
+              msg += `> 2️⃣ 2nd Period: **${p2}** goals\n\n`;
+            }
+
+            msg += `_puckbybr.github.io/pucks-picks_`;
+
+            /* Post — split if over Discord 2000 char limit */
+            if (msg.length <= 2000) {
+              const status = await postDiscord(msg);
+              console.log('Discord status:', status);
+            } else {
+              const lines = msg.split('\n');
+              let chunk = '';
+              for (const line of lines) {
+                if ((chunk+line+'\n').length > 1900) {
+                  await postDiscord(chunk.trim());
+                  await new Promise(r=>setTimeout(r,600));
+                  chunk = line+'\n';
+                } else { chunk += line+'\n'; }
+              }
+              if (chunk.trim()) await postDiscord(chunk.trim());
+            }
+          }
+
+          main().catch(e=>{console.error(e);process.exit(1);});
+          EOF
